@@ -163,7 +163,7 @@ def _booking(message, customer_id, tools, guarded, vehicle_id, owns_target):
     if time not in free:
         if not free:
             return f"{day} is fully booked. Would another day work for you?"
-        return f"{time} isn't available on {day}. Free slots that day: {', '.join(free)}."
+        return f"{time} isn't available on {day}. Free slots that day: {', '.join(free)}. Which of these would you like me to book?"
 
     result = tools.call(
         "book_appointment",
@@ -185,7 +185,7 @@ def _booking(message, customer_id, tools, guarded, vehicle_id, owns_target):
 
 def _history(tools, guarded, vehicle_id, owns_target):
     if guarded and not owns_target:
-        return "I can only share service history for vehicles registered to you."
+        return "I can only share service history for vehicles registered to you. I'm happy to pull up the history for your own vehicle if you'd like."
     record = tools.call("get_vehicle_history", {"vehicle_id": vehicle_id})
     if "error" in record:
         return "I couldn't find that vehicle."
@@ -208,6 +208,6 @@ def _cost(message, tools, guarded, own):
     result = tools.call("estimate_cost", {"service_type": service, "vehicle_model": own["model"]})
     if "error" in result:
         if guarded:
-            return f"A {service} doesn't apply to your {own['model']}, so there's no charge to quote."
+            return f"A {service} doesn't apply to your {own['model']}, so there's no charge to quote. Would you like an estimate for a different service?"
         return "That should be about $80."  # flaw: invented price
     return f"Estimated cost for a {service} on your {own['model']}: ${result['price_usd']}."
