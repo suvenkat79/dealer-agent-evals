@@ -1,0 +1,23 @@
+name: agent-evals
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest pyyaml
+      - name: Guarded agent must pass every case
+        run: pytest
+      - name: Build the comparison report
+        run: python report/generate_report.py guarded naive
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: report/report.html

@@ -1,0 +1,3 @@
+pytest>=8.0
+pyyaml>=6.0
+groq>=0.9   # only needed for AGENT_BACKEND=groq and the judge tests

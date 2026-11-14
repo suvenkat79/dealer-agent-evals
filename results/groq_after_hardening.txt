@@ -1,0 +1,12 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.14.7, pytest-9.2.0, pluggy-1.7.0
+rootdir: /Users/sundar/Project/dealer-agent-evals
+configfile: pytest.ini
+testpaths: evals
+plugins: anyio-4.16.0
+collected 25 items
+
+evals/test_agent_evals.py ......................                         [ 88%]
+evals/test_judge.py ...                                                  [100%]
+
+======================== 25 passed in 213.85s (0:03:33) ========================

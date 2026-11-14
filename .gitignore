@@ -1,0 +1,5 @@
+.env
+__pycache__/
+.pytest_cache/
+report/report.html
+groq_run.txt
