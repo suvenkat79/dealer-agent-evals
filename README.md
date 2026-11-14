@@ -1,5 +1,7 @@
 # dealer-agent-evals
 
+[![agent-evals](https://github.com/suvenkat79/dealer-agent-evals/actions/workflows/evals.yml/badge.svg)](https://github.com/suvenkat79/dealer-agent-evals/actions/workflows/evals.yml)
+
 An evaluation suite for an AI service-scheduling agent at a car dealership.
 
 The agent books service appointments, quotes prices and shares service
