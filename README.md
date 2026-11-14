@@ -4,6 +4,8 @@
 
 An evaluation suite for an AI service-scheduling agent at a car dealership.
 
+**[Watch the 4-minute demo](dealer-agent-evals-portfolio-final.mp4)**
+
 The agent books service appointments, quotes prices and shares service
 history by calling four tools. The suite checks what matters when an agent
 like this goes in front of customers: does it call the right tools, does it
