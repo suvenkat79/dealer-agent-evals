@@ -31,7 +31,7 @@ def book(tools, quote_id, **override):
 @pytest.mark.parametrize("scenario", [NO_CHANGE, CHANGE])
 @pytest.mark.parametrize("service", ["oil change", "tire rotation"])
 def test_booking_without_quote_id_is_refused(scenario, service):
-    tools = Tools(scenario=scenario)
+    tools = Tools(scenario=scenario, customer_id="C001")
     tools.check_availability(SLOT["date"], service)
     result = tools.book_appointment(**{**SLOT, "service_type": service})
     assert (result["status"], result["reason"]) == ("failed", "quote_required")
@@ -45,7 +45,7 @@ def test_booking_without_quote_id_is_refused_mid_conversation_too():
 
 
 def test_non_quote_bookings_still_work_without_a_scenario():
-    tools = Tools()
+    tools = Tools(customer_id="C001")
     tools.check_availability(SLOT["date"], "oil change")
     assert tools.book_appointment(**SLOT)["status"] == "confirmed"
 
@@ -96,7 +96,7 @@ def test_no_price_change_workflow_needs_quote_consent_and_validation_in_order():
 
 
 def test_booking_without_validation_is_refused_for_direct_tool_use():
-    tools = Tools(scenario=NO_CHANGE)
+    tools = Tools(scenario=NO_CHANGE, customer_id="C001")
     issued = quote(tools)
     assert book(tools, issued["quote_id"])["reason"] == "validation_required"
 
@@ -130,14 +130,16 @@ def test_replacement_quote_booking_still_needs_the_confirmed_price():
     "override, reason",
     [
         ({"service_type": "brake inspection"}, "quote_service_mismatch"),
-        ({"customer_id": "C002"}, "quote_customer_mismatch"),
-        ({"vehicle_id": "V002"}, "quote_vehicle_mismatch"),
+        # The session customer is checked before the quote, so these are refused earlier (see test_identity.py
+        # for the quote-binding versions of the same two checks).
+        ({"customer_id": "C002"}, "customer_mismatch"),
+        ({"vehicle_id": "V002"}, "vehicle_not_available"),
         ({"date": "2026-11-19"}, "quote_slot_mismatch"),
         ({"time": "11:00"}, "quote_slot_mismatch"),
     ],
 )
 def test_booking_must_match_what_the_quote_was_issued_for(override, reason):
-    tools = Tools(scenario=NO_CHANGE)
+    tools = Tools(scenario=NO_CHANGE, customer_id="C001")
     quote_id = validated_quote(tools)
     tools.check_availability("2026-11-19", "brake inspection")
     result = book(tools, quote_id, **override)
@@ -146,28 +148,28 @@ def test_booking_must_match_what_the_quote_was_issued_for(override, reason):
 
 
 def test_an_oil_change_quote_cannot_authorise_a_brake_inspection():
-    tools = Tools(scenario=NO_CHANGE)
+    tools = Tools(scenario=NO_CHANGE, customer_id="C001")
     quote_id = validated_quote(tools)
     tools.check_availability(SLOT["date"], "brake inspection")
     assert book(tools, quote_id, service_type="brake inspection")["reason"] == "quote_service_mismatch"
 
 
 def test_quote_price_mismatch_is_refused():
-    tools = Tools(scenario=NO_CHANGE)
+    tools = Tools(scenario=NO_CHANGE, customer_id="C001")
     quote_id = validated_quote(tools)
     result = tools.book_appointment(**SLOT, quote_id=quote_id, confirmed_price_usd="60")
     assert (result["reason"], result["current_price_usd"]) == ("price_mismatch", 79)
 
 
 def test_the_matching_booking_is_confirmed():
-    tools = Tools(scenario=NO_CHANGE)
-    tools = Tools(scenario=NO_CHANGE)
+    tools = Tools(scenario=NO_CHANGE, customer_id="C001")
+    tools = Tools(scenario=NO_CHANGE, customer_id="C001")
     quote_id = validated_quote(tools)
     assert tools.book_appointment(**SLOT, quote_id=quote_id, confirmed_price_usd="79")["status"] == "confirmed"
 
 
 def test_quotes_for_different_slots_are_different_quotes():
-    tools = Tools(scenario=NO_CHANGE)
+    tools = Tools(scenario=NO_CHANGE, customer_id="C001")
     assert quote(tools)["quote_id"] == "Q-1001"
     assert quote(tools)["quote_id"] == "Q-1001"  # same slot: reused
     assert quote(tools, time="11:00")["quote_id"] == "Q-1002"
@@ -176,44 +178,44 @@ def test_quotes_for_different_slots_are_different_quotes():
 # --- who the quote is for ---
 
 def test_a_quote_is_refused_for_a_vehicle_the_customer_does_not_own():
-    tools = Tools(scenario=NO_CHANGE)
+    tools = Tools(scenario=NO_CHANGE, customer_id="C001")
     result = quote(tools, vehicle_id="V002", vehicle_model="F-150")
-    assert result["reason"] == "vehicle_customer_mismatch" and tools.quotes == {}
+    assert result["reason"] == "vehicle_not_available" and tools.quotes == {}
 
 
 def test_a_quote_is_refused_when_the_model_does_not_match_the_vehicle():
-    tools = Tools(scenario=NO_CHANGE)
+    tools = Tools(scenario=NO_CHANGE, customer_id="C001")
     assert quote(tools, vehicle_model="Corolla")["reason"] == "vehicle_model_mismatch"
 
 
 def test_a_quote_is_refused_for_an_unknown_vehicle():
-    assert quote(Tools(scenario=NO_CHANGE), vehicle_id="V999")["reason"] == "vehicle_not_found"
+    assert quote(Tools(scenario=NO_CHANGE, customer_id="C001"), vehicle_id="V999")["reason"] == "vehicle_not_available"
 
 
 # --- availability must come first, for the same service, date and time ---
 
 def test_availability_must_be_checked_before_a_quote():
-    tools = Tools(scenario=NO_CHANGE)
+    tools = Tools(scenario=NO_CHANGE, customer_id="C001")
     result = tools.get_quote("oil change", "Civic", SLOT["date"], SLOT["time"], "C001", "V001")
     assert result["reason"] == "availability_not_checked" and tools.quotes == {}
 
 
 def test_availability_for_a_different_date_does_not_authorise_a_quote():
-    tools = Tools(scenario=NO_CHANGE)
+    tools = Tools(scenario=NO_CHANGE, customer_id="C001")
     tools.check_availability("2026-11-19", "oil change")
     result = tools.get_quote("oil change", "Civic", "2026-11-20", "10:00", "C001", "V001")
     assert result["reason"] == "availability_not_checked"
 
 
 def test_availability_for_a_different_service_does_not_authorise_a_quote():
-    tools = Tools(scenario=NO_CHANGE)
+    tools = Tools(scenario=NO_CHANGE, customer_id="C001")
     tools.check_availability(SLOT["date"], "tire rotation")
     result = tools.get_quote("oil change", "Civic", SLOT["date"], SLOT["time"], "C001", "V001")
     assert result["reason"] == "availability_not_checked"
 
 
 def test_an_open_slot_at_a_different_time_does_not_authorise_a_quote():
-    tools = Tools(scenario=NO_CHANGE)
+    tools = Tools(scenario=NO_CHANGE, customer_id="C001")
     free = tools.check_availability(SLOT["date"], "oil change")["free_slots"]
     assert "14:00" not in free  # booked on 2026-11-20
     result = tools.get_quote("oil change", "Civic", SLOT["date"], "14:00", "C001", "V001")
@@ -221,14 +223,14 @@ def test_an_open_slot_at_a_different_time_does_not_authorise_a_quote():
 
 
 def test_a_closed_day_cannot_be_quoted():
-    tools = Tools(scenario=NO_CHANGE)
+    tools = Tools(scenario=NO_CHANGE, customer_id="C001")
     tools.check_availability("2026-11-21", "oil change")  # a Saturday: not in the calendar
     result = tools.get_quote("oil change", "Civic", "2026-11-21", "10:00", "C001", "V001")
     assert result["reason"] == "slot_not_available"
 
 
 def test_the_slot_cannot_be_quoted_or_booked_twice():
-    tools = Tools(scenario=NO_CHANGE)
+    tools = Tools(scenario=NO_CHANGE, customer_id="C001")
     quote_id = validated_quote(tools)
     assert book(tools, quote_id)["status"] == "confirmed"
     assert quote(tools)["reason"] == "slot_not_available"
@@ -236,7 +238,7 @@ def test_the_slot_cannot_be_quoted_or_booked_twice():
 
 
 def test_booking_needs_availability_checked_for_the_date():
-    tools = Tools(scenario=NO_CHANGE)
+    tools = Tools(scenario=NO_CHANGE, customer_id="C001")
     quote_id = validated_quote(tools)
     tools._availability.clear()  # as if the check never happened for this booking
     assert book(tools, quote_id)["reason"] == "availability_not_checked"
@@ -245,13 +247,13 @@ def test_booking_needs_availability_checked_for_the_date():
 # --- direct tool use cannot bypass any of it (no begin_turn, no conversation runner) ---
 
 def test_direct_tool_calls_cannot_skip_quote_validation_or_availability():
-    tools = Tools(scenario=NO_CHANGE)
+    tools = Tools(scenario=NO_CHANGE, customer_id="C001")
     assert tools.book_appointment(**SLOT)["reason"] == "quote_required"
     assert tools.get_quote("oil change", "Civic", SLOT["date"], SLOT["time"], "C001", "V001")["reason"] == "availability_not_checked"
     issued = quote(tools)
     assert book(tools, issued["quote_id"])["reason"] == "validation_required"
     assert tools.validate_quote(issued["quote_id"])["status"] == "valid"
-    assert book(tools, issued["quote_id"], customer_id="C002")["reason"] == "quote_customer_mismatch"
+    assert book(tools, issued["quote_id"], customer_id="C002")["reason"] == "customer_mismatch"
     assert book(tools, issued["quote_id"])["status"] == "confirmed"
 
 

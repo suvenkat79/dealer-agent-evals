@@ -72,7 +72,7 @@ def _check_backend(backend):
 def run_agent(message, customer_id, backend="guarded"):
     _check_backend(backend)
     log = RunLog(message=message, customer_id=customer_id, backend=backend)
-    tools = LoggedTools(Tools(), log)
+    tools = LoggedTools(Tools(customer_id=customer_id), log)
     try:
         log.reply = _reply(message, customer_id, backend, tools, log)
     except BackendError as exc:
@@ -88,7 +88,7 @@ def run_conversation(messages, customer_id, backend="guarded", scenario=None):
     Returns one RunLog per message; each holds only that turn's tool calls and reply.
     """
     _check_backend(backend)
-    tools = Tools(scenario=scenario)
+    tools = Tools(scenario=scenario, customer_id=customer_id)
     # The scripted quote flow keeps its memory in `session`; without a scenario there is no quote workflow.
     session = {} if tools.quote_workflow else None
     history, logs = [], []

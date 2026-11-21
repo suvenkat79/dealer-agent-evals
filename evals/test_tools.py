@@ -7,7 +7,7 @@ BOOKING = dict(customer_id="C001", vehicle_id="V001", date="2026-11-20", time="1
 
 
 def test_price_moves_after_first_quote_and_expires_it():
-    tools = Tools(scenario=CHANGE)
+    tools = Tools(scenario=CHANGE, customer_id="C001")
     issued = quote(tools)
     assert (issued["quote_id"], issued["price_usd"]) == ("Q-1001", 150)
     check = tools.validate_quote("Q-1001")
@@ -16,7 +16,7 @@ def test_price_moves_after_first_quote_and_expires_it():
 
 
 def test_expired_validation_returns_a_replacement_and_never_a_third_quote():
-    tools = Tools(scenario=CHANGE)
+    tools = Tools(scenario=CHANGE, customer_id="C001")
     quote(tools)
     check = tools.validate_quote("Q-1001")
     assert check["replacement_quote_id"] == "Q-1002"
@@ -26,13 +26,13 @@ def test_expired_validation_returns_a_replacement_and_never_a_third_quote():
 
 
 def test_booking_requires_validation():
-    tools = Tools(scenario=CHANGE)
+    tools = Tools(scenario=CHANGE, customer_id="C001")
     quote(tools)
     assert tools.book_appointment(**BOOKING, quote_id="Q-1001")["reason"] == "validation_required"
 
 
 def test_expired_quote_is_never_bookable():
-    tools = Tools(scenario=CHANGE)
+    tools = Tools(scenario=CHANGE, customer_id="C001")
     quote(tools)
     tools.validate_quote("Q-1001")  # reports expired; does not mark the old quote validated
     result = tools.book_appointment(**BOOKING, quote_id="Q-1001", confirmed_price_usd="150")
@@ -41,7 +41,7 @@ def test_expired_quote_is_never_bookable():
 
 
 def test_replacement_quote_books_at_the_new_price():
-    tools = Tools(scenario=CHANGE)
+    tools = Tools(scenario=CHANGE, customer_id="C001")
     quote(tools)
     tools.validate_quote("Q-1001")
     result = tools.book_appointment(**BOOKING, quote_id="Q-1002", confirmed_price_usd="180")
@@ -49,14 +49,14 @@ def test_replacement_quote_books_at_the_new_price():
 
 
 def test_wrong_confirmed_price_is_rejected():
-    tools = Tools(scenario=CHANGE)
+    tools = Tools(scenario=CHANGE, customer_id="C001")
     quote(tools)
     tools.validate_quote("Q-1001")
     assert tools.book_appointment(**BOOKING, quote_id="Q-1002", confirmed_price_usd="150")["reason"] == "price_mismatch"
 
 
 def test_unchanged_price_validates_and_books_on_the_original_quote():
-    tools = Tools(scenario={})
+    tools = Tools(scenario={}, customer_id="C001")
     assert quote(tools)["quote_id"] == "Q-1001"
     assert tools.validate_quote("Q-1001")["status"] == "valid"
     assert tools.book_appointment(**BOOKING, quote_id="Q-1001", confirmed_price_usd="79")["status"] == "confirmed"

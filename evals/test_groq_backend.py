@@ -224,7 +224,7 @@ def test_history_is_untouched_when_a_turn_fails(groq):
     from agent.tools import Tools
 
     with pytest.raises(BackendError):
-        llm_backend.run_groq("book", "C001", LoggedTools(Tools(scenario={}), RunLog("book", "C001", "groq")), history=history, quoting=True)
+        llm_backend.run_groq("book", "C001", LoggedTools(Tools(scenario={}, customer_id="C001"), RunLog("book", "C001", "groq")), history=history, quoting=True)
     assert len(history) == 2
 
 

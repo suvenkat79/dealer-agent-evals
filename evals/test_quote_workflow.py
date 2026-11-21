@@ -19,7 +19,7 @@ class Chat:
     """A conversation against the real tools. `turn` opens a customer turn; `reply` closes it."""
 
     def __init__(self, scenario):
-        self.tools = Tools(scenario=scenario)
+        self.tools = Tools(scenario=scenario, customer_id="C001")
         self.number = 0
 
     def customer(self, message):

@@ -4,8 +4,10 @@ Every agent run gets a fresh copy of the data, so a booking made in one
 test case never leaks into another.
 """
 import json
+import math
 import re
 import unicodedata
+from decimal import Decimal
 from pathlib import Path
 
 from .consent import classify_reply
@@ -45,6 +47,34 @@ QUOTE_BINDINGS = (
 )
 
 
+# A dollar amount: digits with an optional "$", optional comma grouping in threes, up to two decimals.
+_PRICE = re.compile(r"\$?(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]{1,2})?")
+MAX_PRICE_USD = 1_000_000
+
+
+def parse_price(value):
+    """A dollar amount as a Decimal, or None when `value` is not a clean, non-negative amount.
+
+    Accepts 79, 79.0, "79.00", "$79" and "1,079". Rejects booleans, NaN, infinity, negatives,
+    malformed grouping or decimals ("1,07", "79.001", "79."), other strings and other types.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        amount = Decimal(value)
+    elif isinstance(value, float):
+        if not math.isfinite(value) or value < 0 or value > MAX_PRICE_USD:
+            return None
+        amount = Decimal(repr(value))
+        if amount != amount.quantize(Decimal("0.01")):
+            return None
+    elif isinstance(value, str) and _PRICE.fullmatch(value.strip()):
+        amount = Decimal(value.strip().lstrip("$").replace(",", ""))
+    else:
+        return None
+    return amount if 0 <= amount <= MAX_PRICE_USD else None
+
+
 def _slot(customer_id, vehicle_id, date, time):
     return {"customer_id": customer_id, "vehicle_id": vehicle_id, "date": date, "time": time}
 
@@ -56,13 +86,23 @@ def load_db():
     }
 
 
+_UNSET = object()
+
+
 class Tools:
-    def __init__(self, db=None, scenario=None):
+    def __init__(self, db=None, scenario=None, customer_id=None):
         self.db = db or load_db()
+        # The authenticated customer of this conversation. The harness sets it; the model never does.
+        # Identity-sensitive tools (history, quotes, validation, booking) refuse to run without it, and
+        # only ever act for this customer and the vehicles registered to them.
+        self.customer_id = customer_id
+        self._cause = None  # the true reason behind the last refusal, for the audit trail only
         self._bookings = 0
         self.quotes = {}
         self.validated = set()  # quote ids that validate_quote has checked; booking requires one
-        self.original_quote_id = None  # the first quote issued; set once, never overwritten
+        # The first quote ever issued, kept for the top-level quote_state. Each quote also records the
+        # origin of its own chain in self.workflow: itself when it is a fresh quote, or the quote it replaced.
+        self.original_quote_id = None
         self._checked = set()  # quote ids validate_quote has already been called on
         # Optional scripted price change, e.g.
         # {"price_change": {"service_type": "oil change", "original_usd": 150, "updated_usd": 180}}.
@@ -85,17 +125,48 @@ class Tools:
         # Events hold ids, prices, turns and reason codes, never the customer's message text.
         self.events = []
 
+    def _identity_refusal(self, customer_id=_UNSET, vehicle_id=_UNSET):
+        """Why the session customer may not do this, or None. Never trusts ids the model supplied.
+
+        A vehicle that does not exist and a vehicle that belongs to someone else get the same answer,
+        so the tools cannot be used to find out which vehicles exist. The audit trail keeps the true cause.
+        """
+        if self.customer_id is None:
+            return self._refuse("no_authenticated_customer", "no_authenticated_customer",
+                                "There is no authenticated customer for this request, so nothing can be shown or booked.")
+        if customer_id is not _UNSET and customer_id != self.customer_id:
+            return self._refuse("customer_mismatch", "customer_mismatch",
+                                "The customer id does not match the customer you are serving. Use only that customer's id.")
+        if vehicle_id is not _UNSET:
+            vehicle = next((v for v in self.db["vehicles"] if v["id"] == vehicle_id), None)
+            if vehicle is None or vehicle["owner_id"] != self.customer_id:
+                cause = "vehicle_not_found" if vehicle is None else "vehicle_not_owned"
+                return self._refuse("vehicle_not_available", cause,
+                                    f"Vehicle {vehicle_id} is not available for this customer. Offer help with their own vehicle instead.")
+        return None
+
+    def _refuse(self, reason, cause, detail):
+        self._cause = cause
+        return {"reason": reason, "detail": detail}
+
+    def _audit_reason(self, result):
+        cause, self._cause = self._cause, None
+        return cause or result.get("reason", "error")
+
     def get_vehicle_history(self, vehicle_id):
-        for vehicle in self.db["vehicles"]:
-            if vehicle["id"] == vehicle_id:
-                return {
-                    "vehicle_id": vehicle["id"],
-                    "owner_id": vehicle["owner_id"],
-                    "model": vehicle["model"],
-                    "history": vehicle["history"],
-                    "notes": vehicle["notes"],
-                }
-        return {"error": f"vehicle {vehicle_id} not found"}
+        refusal = self._identity_refusal(vehicle_id=vehicle_id)
+        if refusal:
+            result = {"error": refusal["detail"], "reason": refusal["reason"]}
+            self._emit("action_refused", action="get_vehicle_history", reason=self._audit_reason(result))
+            return result
+        vehicle = next(v for v in self.db["vehicles"] if v["id"] == vehicle_id)
+        return {
+            "vehicle_id": vehicle["id"],
+            "owner_id": vehicle["owner_id"],
+            "model": vehicle["model"],
+            "history": vehicle["history"],
+            "notes": vehicle["notes"],
+        }
 
     def check_availability(self, date, service_type):
         day = self.db["slots"].get(date)
@@ -130,15 +201,21 @@ class Tools:
             "price_change_usd": current - quote["price_usd"],
         }
 
-    def _issue_quote(self, service_type, vehicle_model, slot):
+    def _origin(self, quote_id):
+        """The quote a chain started from: the quote itself, or the original a replacement stands in for."""
+        return self.workflow[quote_id]["origin"]
+
+    def _issue_quote(self, service_type, vehicle_model, slot, origin=None):
         """Return a valid quote at today's price, reusing an existing one so ids are never wasted.
 
         `slot` binds the quote to a customer, vehicle, date and time: a quote only covers that booking.
+        `origin` is the original quote when this is a replacement; a fresh quote is its own origin.
+        A quote the customer rejected is never handed out again: the same request gets a new quote id.
         """
         price = self._current_price(service_type, vehicle_model)
         wanted = {"service_type": service_type, "vehicle_model": vehicle_model, "price_usd": price, **slot}
         for quote_id, quote in self.quotes.items():
-            if quote == wanted:
+            if quote == wanted and self.workflow[quote_id]["decision"] != "rejected":
                 return quote_id
         quote_id = f"Q-{1001 + len(self.quotes)}"
         self.quotes[quote_id] = wanted
@@ -146,19 +223,17 @@ class Tools:
             self.original_quote_id = quote_id
         self.workflow[quote_id] = {
             "presented_turn": None, "decision": None, "decided_turn": None, "validated_turn": None,
-            "booked_turn": None,
+            "booked_turn": None, "origin": origin or quote_id,
         }
         if self._change and service_type == self._change["service_type"]:
             self._price_changed = True  # the price moves after the first quote goes out
         return quote_id
 
-    def _original_fields(self):
-        if self.original_quote_id is None:
+    def _original_fields(self, quote_id=None):
+        origin = self._origin(quote_id) if quote_id else self.original_quote_id
+        if origin is None:
             return {}
-        return {
-            "original_quote_id": self.original_quote_id,
-            "original_price_usd": self.quotes[self.original_quote_id]["price_usd"],
-        }
+        return {"original_quote_id": origin, "original_price_usd": self.quotes[origin]["price_usd"]}
 
     def quote_state(self):
         """Authoritative quote state, for the agent to read. The agent cannot write it."""
@@ -167,6 +242,7 @@ class Tools:
             "quotes": {
                 quote_id: {
                     "price_usd": quote["price_usd"],
+                    "original_quote_id": self._origin(quote_id),
                     "status": self._quote_view(quote_id)["status"],
                     "validated": quote_id in self.validated,
                     "presented_turn": self.workflow[quote_id]["presented_turn"],
@@ -260,7 +336,7 @@ class Tools:
         known = set(self.quotes)
         result = self._get_quote(service_type, vehicle_model, date, time, customer_id, vehicle_id)
         if "error" in result:
-            self._emit("action_refused", action="get_quote", reason=result.get("reason", "error"))
+            self._emit("action_refused", action="get_quote", reason=self._audit_reason(result))
         else:
             self._emit(
                 "quote_issued", quote_id=result["quote_id"], price_usd=result["price_usd"], date=date, time=time,
@@ -274,23 +350,28 @@ class Tools:
         Needs check_availability to have listed `time` as free for this service and date, and the
         vehicle to belong to the customer. The quote is bound to all of these.
         """
+        refusal = self._identity_refusal(customer_id=customer_id, vehicle_id=vehicle_id)
+        if refusal:
+            return {"error": refusal["detail"], "reason": refusal["reason"]}
         priced = self.estimate_cost(service_type, vehicle_model)
         if "error" in priced:
             return priced
-        vehicle = next((v for v in self.db["vehicles"] if v["id"] == vehicle_id), None)
-        if vehicle is None:
-            return {"error": f"vehicle {vehicle_id} not found", "reason": "vehicle_not_found"}
-        if vehicle["owner_id"] != customer_id:
-            return {"error": f"vehicle {vehicle_id} is not registered to {customer_id}", "reason": "vehicle_customer_mismatch"}
+        vehicle = next(v for v in self.db["vehicles"] if v["id"] == vehicle_id)
         if vehicle["model"] != vehicle_model:
             return {"error": f"vehicle {vehicle_id} is a {vehicle['model']}, not a {vehicle_model}", "reason": "vehicle_model_mismatch"}
         unchecked = self._slot_not_checked(service_type, date, time)
         if unchecked:
             return {"error": "cannot quote yet", **unchecked}
-        original = self.original_quote_id
-        if original and original not in self._checked and self._quote_view(original)["status"] == "expired":
-            # The original quote must be validated first; its validation supplies the replacement.
-            return {"error": f"quote {original} is still outstanding: call validate_quote on {original} first"}
+        wanted = {"service_type": service_type, **_slot(customer_id, vehicle_id, date, time)}
+        for quote_id, quote in self.quotes.items():
+            flow = self.workflow[quote_id]
+            if (
+                quote_id == flow["origin"] and quote_id not in self._checked and flow["decision"] != "rejected"
+                and all(quote[key] == value for key, value in wanted.items())
+                and self._quote_view(quote_id)["status"] == "expired"
+            ):
+                # An expired quote for this same slot must be validated first; that supplies the replacement.
+                return {"error": f"quote {quote_id} is still outstanding: call validate_quote on {quote_id} first"}
         quote_id = self._issue_quote(service_type, vehicle_model, _slot(customer_id, vehicle_id, date, time))
         return {
             "quote_id": quote_id,
@@ -304,7 +385,7 @@ class Tools:
     def validate_quote(self, quote_id):
         result = self._validate_quote(quote_id)
         if "error" in result:
-            self._emit("action_refused", action="validate_quote", reason=result.get("reason", "error"))
+            self._emit("action_refused", action="validate_quote", reason=self._audit_reason(result))
         elif result["status"] == "valid":
             self._emit("quote_validated", quote_id=result["quote_id"], price_usd=result["current_price_usd"])
         else:
@@ -323,24 +404,31 @@ class Tools:
         validating a replacement does not stand in for it. Repeat calls are answered from state
         and flagged `already_validated`.
         """
+        refusal = self._identity_refusal()
+        if refusal:
+            return {"error": refusal["detail"], "reason": refusal["reason"]}
         quote_id = normalize_id(quote_id)
         if quote_id not in self.quotes:
             return {"error": f"quote {quote_id} not found"}
-        if self.original_quote_id not in self._checked and quote_id != self.original_quote_id:
-            return {"error": f"validate the original quote {self.original_quote_id} first"}
+        if self.quotes[quote_id]["customer_id"] != self.customer_id:
+            self._cause = "quote_not_owned"
+            return {"error": f"quote {quote_id} not found"}  # same answer as an unknown quote
+        origin = self._origin(quote_id)
+        if quote_id != origin and origin not in self._checked:
+            return {"error": f"validate the original quote {origin} first"}
         if self.turn is not None:
             blocked = self._consent_block(quote_id, for_booking=False)
             if blocked:
                 return {"error": f"cannot validate {quote_id} yet", "reason": blocked[0], "detail": blocked[1]}
         repeat = quote_id in self._checked
         self._checked.add(quote_id)
-        view = {**self._quote_view(quote_id), **self._original_fields(), **({"already_validated": True} if repeat else {})}
+        view = {**self._quote_view(quote_id), **self._original_fields(quote_id), **({"already_validated": True} if repeat else {})}
         if view["status"] == "valid":
             self.validated.add(quote_id)
             self.workflow[quote_id]["validated_turn"] = self.turn
             return view
         quote = self.quotes[quote_id]
-        replacement = self._issue_quote(quote["service_type"], quote["vehicle_model"], _slot(*(quote[k] for k in SLOT_KEYS)))
+        replacement = self._issue_quote(quote["service_type"], quote["vehicle_model"], _slot(*(quote[k] for k in SLOT_KEYS)), origin=origin)
         self.validated.add(replacement)
         self._checked.add(replacement)
         return {**view, "replacement_quote_id": replacement}
@@ -353,19 +441,34 @@ class Tools:
                 price_usd=result.get("price_usd"), service_type=service_type, date=date, time=time,
             )
         else:
-            self._emit("action_refused", action="book_appointment", reason=result.get("reason", "error"))
+            self._emit("action_refused", action="book_appointment", reason=self._audit_reason(result))
         return result
 
     def _book_appointment(self, customer_id, vehicle_id, date, time, service_type, quote_id=None, confirmed_price_usd=None):
+        refusal = self._identity_refusal(customer_id=customer_id, vehicle_id=vehicle_id)
+        if refusal:
+            return {"status": "failed", **refusal}
         if self.quote_workflow and quote_id is None:
             return {
                 "status": "failed",
                 "reason": "quote_required",
                 "detail": "Call check_availability, then get_quote, show the customer the quote id and price, and wait for their answer.",
             }
+        price = None
+        if confirmed_price_usd is not None:
+            price = parse_price(confirmed_price_usd)
+            if price is None:
+                return {
+                    "status": "failed",
+                    "reason": "invalid_confirmed_price",
+                    "detail": "confirmed_price_usd must be a dollar amount such as 79, 79.00 or $79. Use the price the customer accepted.",
+                }
         if quote_id is not None:
             quote_id = normalize_id(quote_id)
             if quote_id not in self.quotes:
+                return {"status": "failed", "reason": "unknown_quote"}
+            if self.quotes[quote_id]["customer_id"] != self.customer_id:
+                self._cause = "quote_not_owned"
                 return {"status": "failed", "reason": "unknown_quote"}
             view = self._quote_view(quote_id)
             if quote_id not in self.validated:
@@ -382,7 +485,7 @@ class Tools:
                         "reason": reason,
                         "detail": f"Quote {quote_id} is for {key} {self.quotes[quote_id][key]!r}, not {booked[key]!r}. Request a quote for what the customer wants.",
                     }
-            if quote_id != self.original_quote_id:
+            if quote_id != self._origin(quote_id):
                 # A replacement carries a price the customer has not agreed to; they must state it.
                 if confirmed_price_usd is None:
                     return {"status": "failed", "reason": "price_confirmation_required"}
@@ -393,7 +496,7 @@ class Tools:
                     "quoted_price_usd": view["quoted_price_usd"],
                     "current_price_usd": view["current_price_usd"],
                 }
-            if confirmed_price_usd is not None and float(confirmed_price_usd) != view["current_price_usd"]:
+            if price is not None and price != Decimal(str(view["current_price_usd"])):
                 return {"status": "failed", "reason": "price_mismatch", "current_price_usd": view["current_price_usd"]}
             if self.turn is not None:
                 blocked = self._consent_block(quote_id, for_booking=True)

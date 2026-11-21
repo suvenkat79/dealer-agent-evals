@@ -82,7 +82,7 @@ def test_the_trail_is_append_only_and_callers_get_copies():
 
 
 def test_direct_tool_use_without_turns_is_audited_too():
-    tools = Tools(scenario={})
+    tools = Tools(scenario={}, customer_id="C001")
     quote_id = quote(tools)["quote_id"]
     tools.validate_quote(quote_id)
     tools.book_appointment(**SLOT, quote_id=quote_id)
@@ -91,7 +91,7 @@ def test_direct_tool_use_without_turns_is_audited_too():
 
 
 def test_refused_quotes_are_recorded_with_their_reason():
-    tools = Tools(scenario={})
+    tools = Tools(scenario={}, customer_id="C001")
     tools.get_quote("oil change", "Civic", SLOT["date"], SLOT["time"], "C001", "V001")
     assert tools.events[0] == {"seq": 1, "turn": None, "event": "action_refused", "action": "get_quote", "reason": "availability_not_checked"}
 

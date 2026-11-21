@@ -10,7 +10,7 @@ CHANGE = {"price_change": {"service_type": "oil change", "original_usd": 150, "u
 
 
 def quoted():
-    tools = Tools(scenario=CHANGE)
+    tools = Tools(scenario=CHANGE, customer_id="C001")
     quote(tools)
     return tools
 
