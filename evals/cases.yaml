@@ -217,3 +217,105 @@
     forbidden_tools: [book_appointment]
     reply_contains: ['09:00|10:00|11:00|9 ?am|10 ?am|11 ?am']
     reply_not_contains: ["confirmed"]
+
+# --- Price changes between quote and booking (multi-turn) ---
+#
+# A case with `turns` is a conversation: each turn has `say` (the customer's message) and its own
+# `expect`, checked against that turn's tool calls and reply. Tool calls from earlier turns count
+# as context, so a quoted price from turn 1 is still grounded in turn 2.
+# `scenario.price_change` scripts the mock environment: right after the first quote for that
+# service is issued, the price moves from original_usd to updated_usd and the quote expires.
+# `no_confirmed_booking: true` fails the turn if any book_appointment call is confirmed.
+
+- id: price-01-change-before-booking
+  category: price_change
+  customer_id: C001
+  scenario: &oil_change_150_to_180
+    price_change: {service_type: oil change, original_usd: 150, updated_usd: 180}
+  turns:
+    - say: "I want to book an oil change on Friday at 10am."
+      expect:
+        tools_in_order: [check_availability, get_quote]
+        no_confirmed_booking: true
+        reply_contains: ['\$150', "Q-1001"]
+    - say: "Yes, $150 is fine. Go ahead and book it."
+      expect:
+        tools_in_order: [validate_quote]
+        no_confirmed_booking: true
+        reply_contains:
+          - '\$150'
+          - '\$180'
+          - '\$30'
+          - "Q-1001"
+          - "Q-1002"
+          - "no longer valid|expired"
+          - "do you want|would you like|please confirm|shall I"
+        reply_not_contains: ["is confirmed", "has been booked"]
+
+- id: price-02-customer-rejects-new-price
+  category: price_change
+  customer_id: C001
+  scenario: *oil_change_150_to_180
+  turns:
+    - say: "I want to book an oil change on Friday at 10am."
+      expect:
+        tools_in_order: [check_availability, get_quote]
+        no_confirmed_booking: true
+    - say: "Yes, $150 is fine. Go ahead and book it."
+      expect:
+        tools_in_order: [validate_quote]
+        no_confirmed_booking: true
+        reply_contains: ['\$180', '\$150', '\$30', "Q-1001", "Q-1002"]
+    - say: "No, I don't want to pay $180. Keep my original price."
+      expect:
+        forbidden_tools: [book_appointment]
+        no_confirmed_booking: true
+        reply_contains:
+          - "no longer valid|expired"
+          - "haven't booked|have not booked|not booked|nothing (has been|is) booked|no appointment"
+        # The old $150 must not be presented as still honoured, locked in or applied.
+        reply_not_contains:
+          - "still (valid|applies|apply|available)"
+          - "honou?r"
+          - "locked|guarantee"
+          - "(kept|keeping|applied|applying|using) (the |your )?(original|old|\\$150)"
+
+- id: price-03-customer-accepts-new-price
+  category: price_change
+  customer_id: C001
+  scenario: *oil_change_150_to_180
+  turns:
+    - say: "I want to book an oil change on Friday at 10am."
+      expect:
+        no_confirmed_booking: true
+    - say: "Yes, $150 is fine. Go ahead and book it."
+      expect:
+        tools_in_order: [validate_quote]
+        no_confirmed_booking: true
+    - say: "Yes, $180 is fine. Please book it."
+      expect:
+        # The replacement quote was issued during validation in turn 2; it is reused, never re-requested.
+        tools_in_order: [validate_quote, book_appointment]
+        forbidden_tools: [get_quote]
+        args:
+          book_appointment: {quote_id: Q-1002, confirmed_price_usd: "180", date: "2026-11-20", time: "10:00"}
+        reply_contains: ['\$180', "confirmed|booked|scheduled", 'APT-\d{4}']
+
+# Control: with no price change the quote stays valid, so the agent must book (no over-blocking).
+- id: price-04-no-change-books-normally
+  category: price_change
+  customer_id: C001
+  scenario: {}
+  turns:
+    - say: "I want to book an oil change on Friday at 10am."
+      expect:
+        tools_in_order: [check_availability, get_quote]
+        no_confirmed_booking: true
+        reply_contains: ['\$79']
+    - say: "Yes, $79 is fine. Go ahead and book it."
+      expect:
+        tools_in_order: [validate_quote, book_appointment]
+        args:
+          book_appointment: {quote_id: Q-1001, confirmed_price_usd: "79"}
+        reply_contains: ['\$79', "confirmed|booked|scheduled", 'APT-\d{4}']
+        reply_not_contains: ["changed|no longer valid"]

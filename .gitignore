@@ -3,3 +3,6 @@ __pycache__/
 .pytest_cache/
 report/report.html
 groq_run.txt
+
+# Live-run telemetry holds customer conversation text: keep local
+results/live_runs/

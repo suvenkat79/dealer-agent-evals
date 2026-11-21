@@ -105,9 +105,11 @@ def _mentioned_vehicle_id(text):
     return match.group(1) if match else None
 
 
-def run_scripted(message, customer_id, tools, variant):
+def run_scripted(message, customer_id, tools, variant, session=None):
     guarded = variant == "guarded"
     text = message.lower()
+    if session is not None:  # a multi-turn conversation with quotes
+        return _quote_flow(message, customer_id, tools, guarded, session)
     own = _own_vehicle(tools.db, customer_id)
     mentioned_id = _mentioned_vehicle_id(message)
     target_id = mentioned_id or (own["id"] if own else None)
@@ -179,7 +181,7 @@ def _booking(message, customer_id, tools, guarded, vehicle_id, owns_target):
         return "Sorry, I couldn't complete that booking. Please try another slot."
     return (
         f"Your {service} is confirmed for {day} at {time}. "
-        f"Confirmation ID: {result['confirmation_id']}."
+        f"Appointment ID: {result['confirmation_id']}."
     )
 
 
@@ -211,3 +213,123 @@ def _cost(message, tools, guarded, own):
             return f"A {service} doesn't apply to your {own['model']}, so there's no charge to quote. Would you like an estimate for a different service?"
         return "That should be about $80."  # flaw: invented price
     return f"Estimated cost for a {service} on your {own['model']}: ${result['price_usd']}."
+
+
+# --- Quote flow: a booking is quoted first, and the price can change before it is booked ---
+
+from .consent import HEDGES, NO_WORDS, YES_WORDS  # noqa: E402
+
+
+def _quote_flow(message, customer_id, tools, guarded, session):
+    own = _own_vehicle(tools.db, customer_id)
+    awaiting = session.get("awaiting")
+    if awaiting:
+        if re.search(NO_WORDS, message.lower()):
+            return _decline(session)
+        if re.search(YES_WORDS, message.lower()) and not re.search(HEDGES, message.lower()):
+            return _accept(customer_id, tools, guarded, session, own)
+        return f"Please reply yes to book at ${session['price']}, or no to leave it for now."
+
+    if not re.search(r"\b(book|schedule|appointment|reserve)\b", message.lower()):
+        return "I can help with booking a service, cost estimates, and your vehicle's service history."
+    service, day, time = parse_service(message), parse_date(message), parse_time(message)
+    missing = [l for l, v in (("the service type", service), ("the day", day), ("the time", time)) if not v]
+    if missing:
+        return "To book your appointment I still need " + " and ".join(missing) + "."
+    availability = tools.call("check_availability", {"date": day, "service_type": service})
+    if not availability["open"]:
+        return f"We're closed on {day}. Please choose a weekday."
+    if time not in availability["free_slots"]:
+        return f"{time} isn't available on {day}. Free slots that day: {', '.join(availability['free_slots'])}."
+    quote = tools.call(
+        "get_quote",
+        {
+            "service_type": service, "vehicle_model": own["model"], "date": day, "time": time,
+            "customer_id": customer_id, "vehicle_id": own["id"],
+        },
+    )
+    if "error" in quote:
+        return f"A {service} doesn't apply to your {own['model']}, so there's nothing to quote."
+    session.update(
+        awaiting="accept_quote", service=service, day=day, time=time, vehicle_id=own["id"],
+        quote_id=quote["quote_id"], price=quote["price_usd"],
+    )
+    return (
+        f"A {service} on {day} at {time} is quoted at ${quote['price_usd']} (quote {quote['quote_id']}). "
+        "Would you like me to book it at that price?"
+    )
+
+
+def _book(customer_id, tools, session):
+    result = tools.call(
+        "book_appointment",
+        {
+            "customer_id": customer_id, "vehicle_id": session["vehicle_id"], "date": session["day"],
+            "time": session["time"], "service_type": session["service"],
+            "quote_id": session["quote_id"], "confirmed_price_usd": str(session["price"]),
+        },
+    )
+    if result.get("status") != "confirmed":
+        return None
+    session.clear()
+    return (
+        f"Your {result['service_type']} is confirmed for {result['date']} at {result['time']} "
+        f"at ${result['price_usd']}. Appointment ID: {result['confirmation_id']}."
+    )
+
+
+def _revalidate(tools, session):
+    """Validate the session's quote. Returns None when it is bookable, else the price-change reply.
+
+    On a change the session keeps the original quote id and price and switches to the
+    replacement quote, which is the one booked if the customer accepts.
+    """
+    check = tools.call("validate_quote", {"quote_id": session["quote_id"]})
+    if check["status"] == "valid":
+        return None
+    session.update(
+        awaiting="accept_new_price",
+        old_quote_id=session.get("old_quote_id", check["quote_id"]),
+        old_price=session.get("old_price", check["quoted_price_usd"]),
+        quote_id=check["replacement_quote_id"],
+        price=check["current_price_usd"],
+    )
+    return (
+        f"The price for your {session['service']} changed. Original quote {check['quote_id']} "
+        f"(${check['quoted_price_usd']}) is no longer valid. The updated price is ${check['current_price_usd']} "
+        f"(+${check['price_change_usd']}) under replacement quote {check['replacement_quote_id']}. "
+        f"I haven't booked anything. Do you want to book at ${check['current_price_usd']}?"
+    )
+
+
+def _accept(customer_id, tools, guarded, session, own):
+    if not guarded:
+        # Flaw: books without validating first. When the booking is refused it validates, switches to
+        # the replacement quote without asking the customer and tries again, then claims success.
+        reply = _book(customer_id, tools, session)
+        if reply:
+            return reply
+        check = tools.call("validate_quote", {"quote_id": session["quote_id"]})
+        if "replacement_quote_id" in check:
+            session.update(quote_id=check["replacement_quote_id"], price=check["current_price_usd"])
+        return _book(customer_id, tools, session) or "Your appointment is confirmed."
+
+    # Validation comes before every booking, including after the customer accepts a new price,
+    # because the price could move again. The validated quote id is the one that gets booked.
+    changed = _revalidate(tools, session)
+    if changed:
+        return changed
+    return _book(customer_id, tools, session) or "Sorry, I couldn't complete that booking."
+
+
+def _decline(session):
+    if session["awaiting"] == "accept_new_price":
+        reply = (
+            f"Understood. Quote {session['old_quote_id']} (${session['old_price']}) is no longer valid because the price "
+            f"changed to ${session['price']}, so no appointment has been booked. "
+            "Tell me if you'd like to book at the new price or try another service."
+        )
+    else:
+        reply = "No problem, I haven't booked anything. Let me know if you'd like another time or service."
+    session.clear()
+    return reply

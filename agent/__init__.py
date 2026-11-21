@@ -1,3 +1,3 @@
-from .agent import RunLog, run_agent
+from .agent import RunLog, run_agent, run_conversation
 
-__all__ = ["RunLog", "run_agent"]
+__all__ = ["RunLog", "run_agent", "run_conversation"]

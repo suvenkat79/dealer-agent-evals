@@ -62,7 +62,7 @@ def render(all_results):
                 parts.append(
                     "<tr>"
                     f"<td><code>{html.escape(result['case']['id'])}</code></td>"
-                    f"<td>{html.escape(result['case']['message'])}</td>"
+                    f"<td>{html.escape(result['log'].message)}</td>"
                     f"<td>{html.escape(result['log'].reply)}</td>"
                     f"<td>{reasons}</td>"
                     "</tr>"
