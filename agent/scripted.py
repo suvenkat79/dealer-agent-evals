@@ -217,16 +217,17 @@ def _cost(message, tools, guarded, own):
 
 # --- Quote flow: a booking is quoted first, and the price can change before it is booked ---
 
-from .consent import HEDGES, NO_WORDS, YES_WORDS  # noqa: E402
+from .consent import classify_reply  # noqa: E402
 
 
 def _quote_flow(message, customer_id, tools, guarded, session):
     own = _own_vehicle(tools.db, customer_id)
     awaiting = session.get("awaiting")
     if awaiting:
-        if re.search(NO_WORDS, message.lower()):
+        decision = classify_reply(message, session["price"])
+        if decision == "rejected":
             return _decline(session)
-        if re.search(YES_WORDS, message.lower()) and not re.search(HEDGES, message.lower()):
+        if decision == "accepted":
             return _accept(customer_id, tools, guarded, session, own)
         return f"Please reply yes to book at ${session['price']}, or no to leave it for now."
 

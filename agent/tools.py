@@ -146,6 +146,7 @@ class Tools:
             self.original_quote_id = quote_id
         self.workflow[quote_id] = {
             "presented_turn": None, "decision": None, "decided_turn": None, "validated_turn": None,
+            "booked_turn": None,
         }
         if self._change and service_type == self._change["service_type"]:
             self._price_changed = True  # the price moves after the first quote goes out
@@ -187,17 +188,32 @@ class Tools:
             for quote_id, flow in self.workflow.items()
             if flow["presented_turn"] is not None and flow["presented_turn"] < number and flow["decision"] is None
         ]
-        if not open_quotes:
-            return
-        quote_id = max(open_quotes)[1]
-        price = self.quotes[quote_id]["price_usd"]
-        decision = classify_reply(message, price)
-        if decision:
-            self.workflow[quote_id].update(decision=decision, decided_turn=number)
-            self._turn_decision = decision
-            self._emit(f"customer_{decision}", quote_id=quote_id, price_usd=price)
-        else:
-            self._emit("customer_response_unclear", quote_id=quote_id, price_usd=price)
+        if open_quotes:
+            quote_id = max(open_quotes)[1]
+            price = self.quotes[quote_id]["price_usd"]
+            decision = classify_reply(message, price)
+            if decision:
+                self.workflow[quote_id].update(decision=decision, decided_turn=number)
+                self._turn_decision = decision
+                self._emit(f"customer_{decision}", quote_id=quote_id, price_usd=price)
+            else:
+                self._emit("customer_response_unclear", quote_id=quote_id, price_usd=price)
+        if self._turn_decision is None:
+            self._withdraw_acceptance(number, message)
+
+    def _withdraw_acceptance(self, number, message):
+        """A customer who said yes can still change their mind before the booking is made.
+
+        An accepted quote that is not booked yet is turned into a rejection when a later message
+        declines. It can only be booked again after the customer is shown it again and re-accepts.
+        """
+        for quote_id, flow in self.workflow.items():
+            if flow["decision"] != "accepted" or flow["booked_turn"] is not None or flow["decided_turn"] >= number:
+                continue
+            if classify_reply(message, self.quotes[quote_id]["price_usd"]) == "rejected":
+                flow.update(decision="rejected", decided_turn=number)
+                self._turn_decision = "rejected"
+                self._emit("customer_acceptance_withdrawn", quote_id=quote_id, price_usd=self.quotes[quote_id]["price_usd"])
 
     def end_turn(self, reply):
         """A quote counts as shown to the customer once the reply names both its id and its price."""
@@ -389,6 +405,8 @@ class Tools:
         if day is None or day.get(time) != "free":
             return {"status": "failed", "reason": "slot not available"}
         day[time] = "booked"
+        if quote_id:
+            self.workflow[quote_id]["booked_turn"] = self.turn
         for (_, checked_date), free in self._availability.items():
             if checked_date == date:
                 free.discard(time)

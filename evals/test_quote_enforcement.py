@@ -295,3 +295,74 @@ def test_scripted_backends_do_not_quote_a_closed_day_or_a_taken_time():
     for message in ("Book an oil change on Saturday at 10am.", "Book an oil change on Wednesday at 10am."):
         log = run_conversation([message], "C001", "guarded", NO_CHANGE)[0]
         assert "get_quote" not in [c["name"] for c in log.tool_calls]
+
+
+# --- review findings F1 and F3 end to end ---
+
+def test_an_old_price_without_a_dollar_sign_does_not_accept_the_replacement_price():
+    chat = quoted_chat(CHANGE)
+    chat.customer("Yes, $150 is fine.")
+    assert chat.tools.validate_quote("Q-1001")["replacement_quote_id"] == "Q-1002"
+    chat.agent_says("Quote Q-1001 ($150) is no longer valid. Quote Q-1002 is $180 (+$30). Do you want it?")
+    chat.customer("Yes, 150 is fine, book it.")
+    assert chat.tools.quote_state()["quotes"]["Q-1002"]["customer_decision"] is None
+    assert chat.tools.validate_quote("Q-1002")["reason"] == "customer_acceptance_required"
+    assert chat.book("Q-1002", 180)["status"] == "failed"
+    assert chat.tools.db["slots"][SLOT["date"]][SLOT["time"]] == "free"
+
+
+def accepted_and_validated():
+    chat = quoted_chat(NO_CHANGE)
+    chat.customer("Yes, $79 is fine.")
+    assert chat.tools.validate_quote("Q-1001")["status"] == "valid"
+    chat.agent_says("Thanks. Shall I confirm the oil change at 10:00 for $79?")
+    return chat
+
+
+@pytest.mark.parametrize("message", ["Actually no, cancel it. I don't want it.", "No thanks.", "never mind", "Actually I don’t want it"])
+def test_acceptance_can_be_withdrawn_before_the_booking(message):
+    chat = accepted_and_validated()
+    chat.customer(message)
+    result = chat.book("Q-1001", 79)
+    assert (result["status"], result["reason"]) == ("failed", "customer_rejected")
+    assert chat.tools.db["slots"][SLOT["date"]][SLOT["time"]] == "free"
+    assert chat.tools.quote_state()["quotes"]["Q-1001"]["customer_decision"] == "rejected"
+    withdrawn = [e for e in chat.tools.events if e["event"] == "customer_acceptance_withdrawn"]
+    assert [(e["turn"], e["quote_id"], e["price_usd"]) for e in withdrawn] == [(3, "Q-1001", 79)]
+
+
+def test_a_withdrawn_quote_can_only_be_booked_after_it_is_shown_and_accepted_again():
+    chat = accepted_and_validated()
+    chat.customer("Actually no, cancel it.")
+    chat.agent_says("Understood, nothing is booked.")
+    chat.customer("Sorry, I changed my mind. Yes, $79 is fine.")
+    assert chat.book("Q-1001", 79)["reason"] == "customer_rejected"  # never shown again, so still declined
+    chat.agent_says("Quote Q-1001 is $79 for the oil change at 10:00. Shall I book it?")
+    chat.customer("Yes, $79 is fine.")
+    assert chat.book("Q-1001", 79)["status"] == "confirmed"
+
+
+@pytest.mark.parametrize("message", ["Great, thanks!", "yes please confirm it", "what time is that again", "Yes, $79 is fine."])
+def test_other_later_messages_do_not_withdraw_an_acceptance(message):
+    chat = accepted_and_validated()
+    chat.customer(message)
+    assert chat.book("Q-1001", 79)["status"] == "confirmed"
+    assert "customer_acceptance_withdrawn" not in [e["event"] for e in chat.tools.events]
+
+
+def test_a_booked_quote_cannot_be_withdrawn_afterwards():
+    chat = accepted_and_validated()
+    assert chat.book("Q-1001", 79)["status"] == "confirmed"
+    chat.customer("No, cancel it.")
+    assert chat.tools.quote_state()["quotes"]["Q-1001"]["customer_decision"] == "accepted"
+    assert "customer_acceptance_withdrawn" not in [e["event"] for e in chat.tools.events]
+
+
+def test_the_scripted_agent_does_not_book_after_a_negated_or_unprefixed_price_reply():
+    for reply in ["That's not fine.", "Ok, I don’t want to pay $79"]:
+        logs = run_conversation(["Book an oil change Friday at 10am.", reply], "C001", "guarded", NO_CHANGE)
+        assert not any(c["result"].get("status") == "confirmed" for log in logs for c in log.tool_calls), reply
+    logs = run_conversation(
+        ["Book an oil change Friday at 10am.", "Yes, $150 is fine.", "Yes, 150 is fine, book it."], "C001", "guarded", CHANGE
+    )
+    assert not any(c["result"].get("status") == "confirmed" for log in logs for c in log.tool_calls)

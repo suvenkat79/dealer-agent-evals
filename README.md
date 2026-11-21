@@ -18,9 +18,9 @@ Deterministic results and live LLM results are reported separately. Only the fir
 
 ### Deterministic results (no API key, no network)
 
-`pytest` on the current code: **186 passed, 3 skipped, 0 failed**. The 3 skipped are the LLM-as-judge
+`pytest` on the current code: **232 passed, 3 skipped, 0 failed**. The 3 skipped are the LLM-as-judge
 checks, which need `GROQ_API_KEY`. 26 of the passes are the eval cases run against the guarded agent; the
-other 160 are unit tests of the tools, consent rules, quote workflow, audit events, telemetry and the Groq
+other 206 are unit tests of the tools, consent rules, quote workflow, audit events, telemetry and the Groq
 backend (driven by a scripted fake client).
 
 | Backend | Eval cases passed | What it is |
@@ -40,7 +40,7 @@ the deterministic numbers above.
 | `price-02` customer rejects new price | passed once | earlier implementation | not recorded | not recorded |
 | `price-03` customer accepts new price | passed once | earlier implementation | 63.94 s | not recorded |
 | `price-04` no change, books normally | failed once, then passed once | failed on the earlier implementation; passed on the implementation with quote binding and availability enforcement | 38.26 s (the pass) | 13,790 across 7 model calls |
-| `price-04` no change, books normally | passed once (latest run) | latest implementation: quote binding, availability enforcement, conservative consent, telemetry and audit events | 27.27 s | 11,415 across 6 model calls |
+| `price-04` no change, books normally | passed once (latest run) | implementation at commit `58f34dd`: quote binding, availability enforcement, conservative consent, telemetry and audit events | 27.27 s | 11,415 across 6 model calls |
 
 Notes on these runs:
 - "Earlier implementation" means before quotes were bound to a service, customer, vehicle, date and time and
@@ -56,8 +56,10 @@ Notes on these runs:
 
 #### Latest live run: `price-04-no-change-books-normally`
 
-**1 successful run, not a pass rate.** One sample says nothing about repeatability. It was run on the latest
-implementation, including the telemetry and audit-event code, so it is the only live evidence for those.
+**1 successful run, not a pass rate.** One sample says nothing about repeatability. It was run on the implementation at commit `58f34dd`, including the telemetry and audit-event code, so it is
+the only live evidence for those. The consent classifier was hardened afterwards (prices without a `$`, negations,
+conditions, curly apostrophes, and withdrawing an acceptance before booking); that change is verified
+deterministically only and has not been run live.
 
 | | |
 | --- | --- |
@@ -77,10 +79,10 @@ because it contains the customer conversation text. The figures above were read 
 
 What this run does not show:
 - The 429s were rate limiting (the 8,000 tokens-per-minute limit was nearly used up), not agent behaviour.
-- The customer's replies were clear yeses, so the rule against reading hedged replies as acceptance was
-  exercised only by deterministic tests.
+- The customer's replies were clear yeses, so the rules against reading hedged, negated or conditional replies
+  as acceptance were exercised only by deterministic tests.
 - Retry-exhausted and over-the-wait-cap failures were also tested only deterministically.
-- price-01 to price-03 have still not been re-run on the latest implementation.
+- price-01 to price-03 have still not been re-run on the implementation at commit `58f34dd` or later.
 
 The `naive` agent fails 17 cases across all five categories: it books
 without checking availability, says "confirmed" when the booking failed,
@@ -206,7 +208,7 @@ Rules that must hold are enforced in code, not only in the prompt:
 - a quote is bound to its service, customer, vehicle, date, time and price. `get_quote` is refused until
   `check_availability` listed that time as free for that service and date, and a booking must match the quote
   exactly. With the quote workflow on, `book_appointment` always needs a `quote_id`;
-- a hedged reply ("ok maybe", "sure, but...", a question) is never read as acceptance;
+- a hedged, negated or conditional reply ("ok maybe", "not fine", "sure, if...", a question) is never read as acceptance, and a price with or without a `$` must equal the quoted price; a customer can withdraw an acceptance before the booking is made;
 - HTTP 429 is retried a bounded number of times (`GROQ_MAX_RETRIES`, `GROQ_MAX_WAIT_S`); if it still
   fails, the case fails with `[external:rate_limit]`. A missing key fails as `[external:missing_api_key]`.
 
